@@ -2,24 +2,26 @@
 """
 train_without_mask.py
 =====================
-Standalone training script — NO action masking.
+Trains PPO, SAC, A2C, and TD3 on the spare parts inventory problem
+with no action mask.
 
-The environment is identical to train_with_mask.py except that the
-SIP-triggered hybrid distributional-interval mask has been completely
-removed from step().  The agent's raw action is always passed through
-(subject only to the standard guard that blocks a second non-urgent
-order while one is already in transit).
+The environment is the same as train_with_mask.py, but the mask has
+been removed. The agent can output any order quantity at any time,
+as long as there is no regular order already on its way.
+
+Without the mask, all four algorithms tend to converge to simply
+never ordering anything. Holding zero stock means no holding cost,
+which looks good on paper — but it also means the system relies
+entirely on expensive rush orders every time a part is needed.
+This script uses a shorter training run (200 episodes) to show that
+behaviour quickly, without needing to wait for a full training run.
+Increase NO_MASK_EPISODES if you want to check whether longer
+training escapes that outcome.
 
 Run from the project root:
     python train_without_mask.py
 
-Results are printed to stdout and saved to results/no_mask_results.csv.
-
-NOTE: Without the mask, all algorithms typically converge to the
-      "never-order" local optimum within 50–200 episodes.  This script
-      uses a short training run (200 episodes per algorithm) to confirm
-      that behaviour quickly.  Increase NO_MASK_EPISODES to verify
-      that longer training does not escape the local optimum.
+Results are saved to results/no_mask_results.csv.
 """
 
 import sys, os, time, math, warnings
@@ -34,7 +36,7 @@ from gymnasium import spaces
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=UserWarning, module='stable_baselines3')
 
-# ── Project paths ─────────────────────────────────────────────────────────────
+# Add the library folders to the path so we can import from them
 sys.path.append(os.path.abspath('lib/demand'))
 sys.path.append(os.path.abspath('lib/cost'))
 
@@ -47,7 +49,7 @@ from inventoryPolices import StandardInventoryPolicy, InventoryPolicyParams
 os.makedirs('results', exist_ok=True)
 os.makedirs('results/figures', exist_ok=True)
 
-# ── Install stable-baselines3 if missing ─────────────────────────────────────
+# Install stable-baselines3 if it is not already available
 import subprocess
 subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'stable-baselines3'])
 from stable_baselines3 import PPO, SAC, A2C, TD3
@@ -57,7 +59,7 @@ from stable_baselines3.common.noise import NormalActionNoise
 
 
 # =============================================================================
-# Demand data loader
+# Load demand data
 # =============================================================================
 def load_all_parts_for_dealer(dealer_id: str,
                                csv_path: str = 'data/demand/demand_series.csv'):
@@ -87,22 +89,21 @@ def load_all_parts_for_dealer(dealer_id: str,
 
 
 # =============================================================================
-# Environment — NO SIP ACTION MASK
+# Inventory environment — no action mask
 # =============================================================================
 class MultiPartInventoryEnvNoMask(gym.Env):
     """
-    Identical to MultiPartInventoryEnv (train_with_mask.py) EXCEPT that the
-    SIP-triggered action mask has been completely removed.
+    Same inventory environment as in train_with_mask.py, but the mask
+    has been removed entirely.
 
-    In step(), the agent's raw action is passed through directly for each part.
-    The only constraint is the standard inventory guard: no second non-urgent
-    order is placed while one is already in transit.
+    The agent's output is passed through as-is. The only thing that
+    blocks an order is if a regular order is already in transit —
+    you can only have one non-urgent order per part at a time.
 
-    All 13 observation features are retained (including the SIP-derived
-    features dyn_rop, dyn_eoq, and sip_signal at indices 10–12) so that the
-    observation space is identical and models cannot be accidentally swapped.
-    The SIP features are informational only — the agent is free to ignore or
-    follow the SIP signal without any hard enforcement.
+    The observation still includes the reorder point, EOQ, and SIP
+    trigger signal (features 10, 11, 12) so the observation space
+    is identical between the two scripts. The agent can use those
+    features as hints, but nothing forces it to act on them.
     """
 
     metadata = {'render_modes': ['human']}
@@ -178,7 +179,8 @@ class MultiPartInventoryEnvNoMask(gym.Env):
         return float(self.demand_dict[pt][start_day:end_day].sum())
 
     def _compute_dyn_rop_eoq(self, pt):
-        """Dynamic ROP/EOQ from rolling demand — used for observations only."""
+        """Work out today's reorder point and order quantity from recent demand.
+        Used for the observation features only — not enforced in this version."""
         recent  = self.demand_hist[pt][-self.demand_history_window:]
         mu_30   = float(np.mean(recent)) if recent else self._avg[pt]
         std_30  = float(np.std(recent))  if len(recent) > 1 else 0.0
@@ -198,13 +200,13 @@ class MultiPartInventoryEnvNoMask(gym.Env):
 
         action = np.asarray(action, dtype=np.float32)
 
-        # ── Step 1 (NO MASK): pass raw action through directly ─────────────────
-        # The only constraint: do not stack a second non-urgent order while one
-        # is already in transit (standard inventory management rule).
+        # Step 1: no mask here — pass the raw action straight through.
+        # The only rule is that you can't place a second regular order
+        # while one is already on its way.
         order_qtys = {}
         for i, pt in enumerate(self.part_types):
             raw_qty = int(np.clip(np.round(float(action[i])), 0, self.max_order))
-            if len(self.nu_pipe[pt]) == 0:   # only order if no non-urgent order in transit
+            if len(self.nu_pipe[pt]) == 0:   # only order if no regular order in transit
                 order_qtys[pt] = raw_qty
             else:
                 order_qtys[pt] = 0
@@ -215,17 +217,17 @@ class MultiPartInventoryEnvNoMask(gym.Env):
         for i, pt in enumerate(self.part_types):
             d = self.day
 
-            # ── Step 2: receive deliveries ─────────────────────────────────────
+            # Step 2: receive any deliveries that are due today
             self.stock[pt] += self._deliver_due(self.nu_pipe, pt, d)
             self.stock[pt] += self._deliver_due(self.urg_pipe, pt, d)
 
-            # ── Step 3: fill outstanding backorders ───────────────────────────
+            # Step 3: use available stock to clear any outstanding backorders
             if self.backorders[pt] > 0:
                 fulfilled = min(self.stock[pt], self.backorders[pt])
                 self.stock[pt]      -= fulfilled
                 self.backorders[pt] -= fulfilled
 
-            # ── Step 4: serve today's demand ──────────────────────────────────
+            # Step 4: serve today's demand, add any shortfall to backorders
             demand = float(self.demand_dict[pt][d])
             self.demand_hist[pt].append(demand)
 
@@ -235,7 +237,7 @@ class MultiPartInventoryEnvNoMask(gym.Env):
             if shortage > 0:
                 self.backorders[pt] += shortage
 
-            # ── Step 5: automatic urgent replenishment on stockout ─────────────
+            # Step 5: if we ran out of stock, place an urgent order automatically
             rush_cost  = 0.0
             urgent_qty = 0.0
             if shortage > 0:
@@ -250,7 +252,7 @@ class MultiPartInventoryEnvNoMask(gym.Env):
                     self.urg_pipe[pt].append((d + self.urgent_lead, float(urgent_qty)))
                     rush_cost = self.RUSH_COST + self.BADWILL_PROXY + self.TRANSPORT_RATE * urgent_qty
 
-            # ── Step 6: place agent's non-urgent order ────────────────────────
+            # Step 6: place the agent's regular order if one isn't already in transit
             order_cost   = 0.0
             order_placed = False
             order_qty    = 0.0
@@ -270,7 +272,7 @@ class MultiPartInventoryEnvNoMask(gym.Env):
                 order_qty    = float(qty)
                 order_cost   = self.ORDER_COST + self.BADWILL_PROXY + self.TRANSPORT_RATE * order_qty
 
-            # ── Step 7: holding cost ──────────────────────────────────────────
+            # Step 7: charge end-of-day holding cost on whatever stock remains
             holding  = self.HOLDING_RATE * self.stock[pt]
             day_cost = rush_cost + order_cost + holding
             total_cost += day_cost
@@ -320,24 +322,25 @@ class MultiPartInventoryEnvNoMask(gym.Env):
             cur_date = self.start_date + _td(days=self.day)
             doy      = cur_date.timetuple().tm_yday / 366.0
 
-            # SIP-derived features are included as observations but NOT enforced
+            # These SIP-based features are included for consistency with the
+            # masked environment, but nothing enforces them here
             dyn_rop, dyn_eoq = self._compute_dyn_rop_eoq(pt)
             dyn_sip = 1.0 if (stock <= dyn_rop and on_order_nu < 1.0) else 0.0
 
             blocks.append(np.array([
-                stock        / self.max_stock,                          # 0
-                backorders   / self.max_stock,                          # 1
-                inv_pos      / self.max_stock,                          # 2
-                on_order_nu  / self.max_stock,                          # 3
-                on_order_u   / self.max_stock,                          # 4
-                days_to_arrival / float(max(self.lead_time, 1)),        # 5
-                self._rate[pt],                                         # 6
-                recent_mean / max(self._avg[pt] * 2.0, 1.0),           # 7
-                recent_std  / max(self._avg[pt] * 2.0, 1.0),           # 8
-                doy,                                                    # 9
-                dyn_rop / self.max_stock,                               # 10  (info only)
-                dyn_eoq / float(self.max_order),                        # 11  (info only)
-                dyn_sip,                                                # 12  (info only)
+                stock        / self.max_stock,                          # 0  on-hand stock
+                backorders   / self.max_stock,                          # 1  backorders
+                inv_pos      / self.max_stock,                          # 2  inventory position
+                on_order_nu  / self.max_stock,                          # 3  regular order in transit
+                on_order_u   / self.max_stock,                          # 4  urgent order in transit
+                days_to_arrival / float(max(self.lead_time, 1)),        # 5  days until next delivery
+                self._rate[pt],                                         # 6  relative demand rate
+                recent_mean / max(self._avg[pt] * 2.0, 1.0),           # 7  30-day average demand
+                recent_std  / max(self._avg[pt] * 2.0, 1.0),           # 8  30-day demand variability
+                doy,                                                    # 9  day of year
+                dyn_rop / self.max_stock,                               # 10 reorder point (info only)
+                dyn_eoq / float(self.max_order),                        # 11 suggested order qty (info only)
+                dyn_sip,                                                # 12 SIP trigger signal (info only)
             ], dtype=np.float32))
 
         return np.concatenate(blocks).astype(np.float32)
@@ -352,7 +355,7 @@ class MultiPartInventoryEnvNoMask(gym.Env):
 
 
 # =============================================================================
-# Progress callback
+# Training progress callback — prints cost every N episodes
 # =============================================================================
 class EpisodeProgressCallback(BaseCallback):
     def __init__(self, total_episodes, algo_name='ALGO', print_every=50):
@@ -383,10 +386,10 @@ class EpisodeProgressCallback(BaseCallback):
 
 
 # =============================================================================
-# Data split
+# Load data and split into train / test
 # =============================================================================
 print('\n' + '='*70)
-print('  TRAINING WITHOUT ACTION MASK — Never-order convergence demo')
+print('  TRAINING WITHOUT ACTION MASK')
 print('='*70)
 
 demand_dict, start_date, part_types = load_all_parts_for_dealer('D00')
@@ -413,20 +416,20 @@ BATCH_SIZE = 256
 NET_ARCH   = [256, 256]
 DEVICE     = 'cpu'
 
-# On-policy
+# On-policy settings (PPO, A2C)
 N_STEPS    = 30
 GAE_LAMBDA = 0.97
 ENT_COEF   = 0.05
 MAX_GRAD   = 0.5
 
-# Off-policy
+# Off-policy settings (SAC, TD3)
 BUFFER     = 500_000
 TAU        = 0.005
 TRAIN_FREQ = T_train
 GRAD_STEPS = 128
 LRN_START  = T_train
 
-# Short training: enough to demonstrate never-order convergence
+# 200 episodes is enough to see the never-order behaviour kick in
 NO_MASK_EPISODES = 200
 
 
@@ -443,11 +446,11 @@ def make_env():
 
 
 # =============================================================================
-# Training
+# Train each algorithm
 # =============================================================================
 trained_models = {}
 
-# ── PPO ───────────────────────────────────────────────────────────────────────
+# PPO
 print(f'\n--- PPO (no mask) — {NO_MASK_EPISODES} episodes ---')
 env_ppo = make_env()
 ppo_model = PPO(
@@ -467,7 +470,7 @@ ep_r_ppo = env_ppo.get_episode_rewards()
 print(f'Last-20-ep mean cost: {-np.mean(ep_r_ppo[-20:]):,.0f} SEK')
 trained_models['PPO'] = ppo_model
 
-# ── SAC ───────────────────────────────────────────────────────────────────────
+# SAC
 print(f'\n--- SAC (no mask) — {NO_MASK_EPISODES} episodes ---')
 env_sac = make_env()
 sac_model = SAC(
@@ -488,7 +491,7 @@ ep_r_sac = env_sac.get_episode_rewards()
 print(f'Last-20-ep mean cost: {-np.mean(ep_r_sac[-20:]):,.0f} SEK')
 trained_models['SAC'] = sac_model
 
-# ── A2C ───────────────────────────────────────────────────────────────────────
+# A2C
 print(f'\n--- A2C (no mask) — {NO_MASK_EPISODES} episodes ---')
 env_a2c = make_env()
 a2c_model = A2C(
@@ -508,7 +511,7 @@ ep_r_a2c = env_a2c.get_episode_rewards()
 print(f'Last-20-ep mean cost: {-np.mean(ep_r_a2c[-20:]):,.0f} SEK')
 trained_models['A2C'] = a2c_model
 
-# ── TD3 ───────────────────────────────────────────────────────────────────────
+# TD3
 print(f'\n--- TD3 (no mask) — {NO_MASK_EPISODES} episodes ---')
 env_td3 = make_env()
 n_act   = env_td3.action_space.shape[0]
@@ -533,7 +536,7 @@ trained_models['TD3'] = td3_model
 
 
 # =============================================================================
-# Evaluation
+# Evaluate all policies on the held-out test period
 # =============================================================================
 def make_test_env():
     return MultiPartInventoryEnvNoMask(
@@ -559,7 +562,7 @@ def run_episode(env, action_fn):
     return rows
 
 def baseline_action(obs, env):
-    """Classical SIP baseline — uses dyn_rop/dyn_eoq from the observation."""
+    # Standard Inventory Policy: order the EOQ whenever stock hits the reorder point
     action    = np.zeros(env.n_parts, dtype=np.float32)
     max_stock = float(env.max_stock)
     max_order = float(env.max_order)
@@ -639,7 +642,7 @@ for n, m in metrics.items():
           f" {m['stockout_rate']*100:>9.1f}%")
 print('='*100)
 
-# Save CSV
+# Save results to CSV
 rows_csv = []
 for n, m in metrics.items():
     b = m['breakdown']
