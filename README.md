@@ -1,222 +1,213 @@
-# TruckParts Demand & Inventory Simulator
-## 🔍 Overview
-This repository provides the implementation and supplementary materials used in the paper “Bridging Forecast Accuracy and Inventory KPIs: A Simulation-Based Evaluation Framework”.
-The system consists of three major components:
-1. **Demand Generator** — generates synthetic demand time-series data for truck parts under a dealer–truck–part hierarchy.  
-2. **Forecasting Model** — builds and evaluates various forecasting techniques, including machine learning and time-series analysis, to predict future parts demand.  
-3. **Cost Simulator** — simulates inventory management using demand and forecast data, applies inventory policies, computes costs and KPIs, and supports comparative evaluation of forecasting models. 
-4. **Outputs** — the system produces result datasets and visualisations including (but not limited to):  
-   - Forecasting accuracy metrics: MAE, RMSE, R2 and IAE, **aggregated across all parts for each forecasting model**.
-   - Dealer-part-level KPIs: total costs, immediate service level (ISL), stockouts, total demand, fulfilled/backorder counts, **aggregated across all parts for each forecasting model**.  
-   - Cost comparison charts: total cost by model (aggregated across all parts)
+# Deep Reinforcement Learning for Spare Parts Inventory Control
 
-## 🚀 Getting Started  
-### 1. Clone the repository  
-`git clone https://github.com/SoFukuhara/PartDemand_Simulator.git`
+A bachelor's thesis project comparing four deep reinforcement learning algorithms against the classical Standard Inventory Policy (SIP) for automotive aftermarket spare parts inventory management.
 
-### 2. Install dependencies  
-`pip install -r requirements.txt`
-(Recommended Python version: Python 3.11)
+Built on top of the synthetic demand simulator developed by Fukuhara et al. (see [References](#references)).
 
+---
 
-## 🚀 Running the Workflow  
-_Open and execute `notebooks/main.ipynb`. The workflow is structured into three phases:_
+## Overview
 
-### Phase 1: Demand Generator  
-The demand generator produces time-series demand data based on the hierarchical structure of dealers, trucks and parts.
-Parameterization includes start time, end time, time interval, number of dealers, range of truck fleet sizes per dealer, and number of parts per truck.
-```python
-from datetime import datetime
-start_time = datetime(2024, 12, 31)
-end_time   = datetime(2027, 12, 31)
-delta_time = 1
-seed       = 3
+The core question this project investigates:
 
-n_dealers     = 2
-n_truck_range = [5, 10]
-n_part_range  = [5, 7]
+> *Can a deep RL agent learn an ordering policy that matches or outperforms the classical (s, Q) Standard Inventory Policy on total cost and service level?*
 
-cfg = SimulationConfig(
-    start_time = start_time,
-    end_time   = end_time,
-    delta_time = delta_time
-)
-sim = Simulator(
-    config       = cfg,
-    seed         = seed,
-    n_dealers    = n_dealers,
-    n_truck_range= n_truck_range,
-    n_part_range = n_part_range
-)
-events = sim.run()
+A single dealer manages **4 spare part types** independently. Each day the agent observes inventory state across all parts and decides how much of each part to order. The environment runs a 7-step daily simulation (receive deliveries → fill backorders → serve demand → trigger rush orders on stockout → place proactive orders → charge holding cost).
+
+**Four algorithms are compared:**
+
+| Algorithm | Policy type | Policy class |
+|-----------|-------------|--------------|
+| PPO | On-policy | Stochastic |
+| A2C | On-policy | Stochastic |
+| SAC | Off-policy | Stochastic |
+| TD3 | Off-policy | Deterministic |
+
+**Two experimental conditions:**
+- **Masked** — A SIP-triggered interval mask constrains each order to `[0, Q*_t]` when stock falls at or below the dynamic reorder point. When the trigger is inactive the agent is forced to output zero.
+- **Unmasked** — Full action space `[0, Q_max]` available at all times.
+
+The SIP is the performance baseline because it is the policy currently used in practice in Volvo Group's Service Market Logistics.
+
+---
+
+## Quickstart
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/nabilrosbeh/TruckParts-Demand-Inventory-Simulator.git
+cd TruckParts-Demand-Inventory-Simulator
 ```
 
-### Phase 2: Forecasting
-The forecasting module builds prediction models for the synthetic demand data generated in Phase 1. It supports multiple model families (e.g., machine-learning models such as XGBoost, SVR, RandomForest, and time-series models such as ARIMA) and allows flexible feature types (basic features and historical features).
-```python
-ForecastMK = forecast_md.ForecastMaker
+### 2. Install dependencies
 
-start_date          = '2025-01-01'
-train_days          = 365 * 2
-ML_model            = ["XGBoost", "SVR", "RandomForest"]
-TSA_model           = ["ARIMA"]
-forecast_model_list = ML_model + TSA_model
-feature_type_list   = ["basic", "historical"]
-
-ForecastMK = ForecastMK(
-    forecast_model_list,
-    feature_type_list,
-    start_date,
-    train_days
-)
-ForecastMK.mk_forecast_model()
+```bash
+pip install -r requirements.txt
 ```
 
-### Phase 3: Cost Simulation & Inventory Policy
-The cost simulation uses the synthtic and forecast demands to evaluate inventory management policies in a dealer-truck-part network. It integrates inventory policy parameters (lead time, service level, initial stock, review period) with simulation logic to compute key performance indicators such as total cost, service level, stockouts, filled/backordered units.
-```python
-lead_time     = 14     # days between placing order and arrival
-service_level = 0.95   # desired fill rate
-initial_stock = 80     # initial stock per part
-review_period = 1      # review frequency (days)
+Requires Python 3.11. Key dependencies: `stable-baselines3`, `gymnasium`, `pandas`, `numpy`, `matplotlib`.
 
-policy_params = InventoryPolicyParams(
-    lead_time     = lead_time,
-    service_level = service_level,
-    review_period = review_period
-)
-policy = StandardInventoryPolicy(policy_params)
+### 3. Train all four algorithms (masked condition)
 
-for model in forecast_model_list:
-    dda = DemandDataArrange(model=model)
-    for feature_type in feature_type_list:
-        if model in ML_model:
-            dda.load_all_part_dealer_information(feature_type)
-        else:
-            dda.load_all_part_dealer_information_for_TSA()
-
-        kpi_results = pd.DataFrame(columns=[
-            "dealer_id", "part_type", "total_costs", "ISL",
-            "total_stockouts", "total_demand",
-            "immediate_fulfilled", "backorder_fulfilled"
-        ])
-
-        for i in range(dda.n_parts):
-            dealer = dda.dealer_part_list[0][i]
-            part   = dda.dealer_part_list[1][i]
-            if model in ML_model:
-                start_time, actual_demand, forecasted_demand = \
-                    dda.load_single_demand_series(feature_type, dealer, part)
-            else:
-                start_time, actual_demand, forecasted_demand = \
-                    dda.load_single_demand_series_for_TSA(dealer, part)
-            start_time = datetime.strptime(start_time, "%Y-%m-%d")
-
-            forecast_config = SimulationConfig(
-                start_time       = start_time,
-                forecast_demand  = forecasted_demand,
-                actual_demand    = actual_demand,
-                inventory_policy = policy,
-                initial_stock    = initial_stock
-            )
-            forecast_simulator = IntegratedSimulator(forecast_config)
-            res_forecast = forecast_simulator.run()
-            kpi_results.loc[len(kpi_results)] = [
-                dealer,
-                part,
-                res_forecast['kpis']['total_costs'],
-                res_forecast['kpis']['immediate_service_level'],
-                res_forecast['kpis']['total_stockouts'],
-                res_forecast['kpis']['total_demand'],
-                res_forecast['kpis']['immediate_fulfilled'],
-                res_forecast['kpis']['backorder_fulfilled']
-            ]
-
-            config = SimulationConfig(
-                start_time       = start_time,
-                forecast_demand  = actual_demand,
-                actual_demand    = actual_demand,
-                inventory_policy = policy,
-                initial_stock    = initial_stock
-            )
-            simulator = IntegratedSimulator(config)
-            res_actual = simulator.run()
-
-        if model in ML_model:
-            dda.write_kpis_results(kpi_results)
-            print(kpi_results)
-            dda.summrize_results()
-            dda.corrcoef_results()
-        else:
-            dda.write_kpis_results_for_TSA(kpi_results)
-            print(kpi_results)
-            dda.summrize_results_for_TSA()
-            dda.corrcoef_results_for_TSA()
+```bash
+python train_with_mask.py
 ```
 
-### Output & Comparison
-The output module aggregates results over all parts for each forecasting model and feature type. It generates visualisations comparing forecast accuracy (MAE, RMSE, IAE) and cost performance across model/feature combinations.
-```python
-import importlib
-import ResultComparison as comp_mod
-importlib.reload(comp_mod)
-ResultComparison = comp_mod.ResultComparison
+This trains PPO, SAC, A2C, and TD3 sequentially, evaluates them against the SIP on a held-out test period, and saves:
+- `results/policy_comparison.csv` — cost and service level metrics for all policies
+- `results/figures/` — learning curves and per-part inventory traces
 
-rscmp = ResultComparison()
-noise_list = []
-rscmp.visual_multiple_feature_results(feature_type_list, ML_model, TSA_model, noise_list)
-```
-## 📁 Repository Structure  
-```│── lib/
-│ └── cost/
-│   ├── Preprocessor.py
-│   ├── simulationLogic.py
-│   ├── inventoryPolices.py
-│   ├── costTracker.py
-│   ├── eventManagement.py
-│   ├── orderManagement.py
-│   ├── stateManagement.py
-│   ├── timeManagement.py
-│   ├── timeStamp.py
-│   ├── plotMetrics.py
-│   └── DemandDataManagement.py
-│ └── demand/
-│   ├── Environment.py
-│   ├── EVENT.py
-│   ├── dealer.py
-│   ├── truck.py
-│   ├── part.py
-│   ├── FailureModel.py
-│   ├── forecast.py
-│   ├── IntermittentAlignmentError.py
-│   ├── Noise_model.py
-│   ├── Parameter.py
-│   ├── RandomForest.py
-│   ├── SVR.py
-│   └── ARIMA.py
-│ └── ResultComparison.py
-│── notebooks/
-│ └── main.ipynb # Main workflow notebook
-│── data/
-│ ├── demand/ # Generated demand datasets
-│ ├── XGBoost/ # Forecasted demand data and simulated results
-│ ├── RandomForest/
-│ ├── SVR/
-│ └── ARIMA/
-│── main.ipynb
-│── requirements.txt # Python dependencies
-└── README.md
+### 4. Train without the action mask (unmasked condition)
+
+```bash
+python train_without_mask.py
 ```
 
-## 📝 References
-This simulator is described in the following paper:
+Identical setup with the mask disabled. Comparing results from both scripts isolates the contribution of the SIP-triggered mask to agent performance.
+
+### 5. Interactive exploration
+
+Open `notebooks/rl_inventory_mask.ipynb` for a step-by-step walkthrough of the masked condition: environment setup, training, evaluation plots, and cost decomposition. Use `notebooks/rl_inventory_nomask.ipynb` for the unmasked condition.
+
+---
+
+## Repository Structure
+
+```
+├── train_with_mask.py          # Training script — masked condition
+├── train_without_mask.py       # Training script — unmasked condition
+├── requirements.txt            # Python dependencies
+│
+├── lib/
+│   ├── demand/
+│   │   ├── Environment.py      # Gymnasium inventory environment (step, reset, obs)
+│   │   ├── dealer.py           # Dealer-level simulation logic
+│   │   ├── demand_management.py
+│   │   └── ...                 # Demand generator components (Fukuhara et al.)
+│   ├── cost/
+│   │   ├── simulationLogic.py  # Daily simulation step (7 operations)
+│   │   ├── inventoryPolices.py # SIP baseline implementation
+│   │   ├── costTracker.py      # Cost accounting (ordering, rush, holding)
+│   │   ├── orderManagement.py  # Order pipeline management
+│   │   └── ...
+│   └── ResultComparison.py     # Aggregation and comparison utilities
+│
+├── notebooks/
+│   ├── rl_inventory_mask.ipynb     # Main RL notebook — masked condition
+│   ├── rl_inventory_nomask.ipynb   # RL notebook — unmasked condition
+│   └── main.ipynb                  # Original SIP simulator notebook
+│
+├── data/
+│   └── demand/
+│       └── demand_series.csv   # Synthetic daily demand data (4 parts, ~2200 days)
+│
+├── results/
+│   ├── policy_comparison.csv   # Final evaluation metrics for all policies
+│   ├── rl_vs_sip.png           # Cost comparison: RL agents vs SIP
+│   ├── decision_trace_all_policies.png  # Order decisions over test period
+│   ├── inventory_results.png   # On-hand stock levels over time
+│   ├── Figures_episode_800_with_mask/   # Learning curves at 800 episodes (masked)
+│   ├── Figures_episode_800_no_mask/     # Learning curves at 800 episodes (unmasked)
+│   ├── Figures_episode_1500_with_mask/  # Learning curves at 1500 episodes (masked)
+│   └── Figures_episode_1500_no_mask/   # Learning curves at 1500 episodes (unmasked)
+│
+└── figures/                    # Thesis figures (demand series, train/test split, daily step diagram)
+```
+
+---
+
+## MDP Formulation
+
+| Component | Definition |
+|-----------|-----------|
+| **State** | 13-dimensional feature vector per part × N parts = 52-dim observation |
+| **Action** | Continuous order quantity per part ∈ [0, Q_max], Q_max = 5,000 units |
+| **Reward** | Negative total daily cost across all parts |
+| **Discount** | γ = 0.995 |
+| **Episode length** | 1,752 days (~5 years) training / 439 days test |
+
+**The 13 per-part observation features:**
+
+| Feature | Description |
+|---------|-------------|
+| `x` | On-hand inventory |
+| `b` | Backorders outstanding |
+| `z` | Inventory position (on-hand + pipeline − backorders) |
+| `u_nu` | Non-urgent units in transit |
+| `u_u` | Urgent units in transit |
+| `τ` | Days until next non-urgent delivery (15 if none in transit) |
+| `d` | Long-run mean daily demand (normalised) |
+| `μ_30` | 30-day rolling mean demand |
+| `σ_30` | 30-day rolling std of demand |
+| `doy` | Fractional day-of-year ∈ [0, 1] |
+| `s_t` | Dynamic reorder point (ROP from 30-day window) |
+| `Q*_t` | Dynamic EOQ (from 365-day window) |
+| `ξ` | SIP trigger signal ∈ {0, 1} |
+
+**Cost structure (per part, per day):**
+
+| Cost component | Value |
+|----------------|-------|
+| Non-urgent order fixed cost | 150 SEK |
+| Rush order fixed cost | 215 SEK |
+| Transport cost | 0.002 SEK / unit |
+| Holding cost | 0.15 × 0.13 SEK / unit / year |
+
+**Lead times:** 14 days (non-urgent), 2 days (urgent/rush).
+
+---
+
+## SIP-Triggered Action Mask
+
+When the SIP trigger fires (on-hand ≤ dynamic ROP and no non-urgent order in transit), the agent's raw output is capped at the dynamic EOQ:
+
+```
+ã_p = clip(round(a_p), 1, max(1, floor(Q*_p)))   if trigger active
+ã_p = 0                                            otherwise
+```
+
+This narrows the decision from *whether and how much to order* to simply *how much to order within [0, Q*]*. The mask is applied inside `step()` before any inventory update, following the continuous action masking framework of Stolz et al. (2024).
+
+---
+
+## Results
+
+Evaluation metrics are in `results/policy_comparison.csv`. Key columns:
+
+| Column | Description |
+|--------|-------------|
+| `Total_Cost_SEK` | Cumulative cost over 439-day test period |
+| `ISL` | Immediate service level (fraction of demand met from on-hand stock) |
+| `vs_SIP_ratio` | Cost relative to SIP (1.0 = SIP performance) |
+| `N_Rush_Events` | Number of automatic rush orders triggered |
+| `Stockout_Rate` | Fraction of days with a stockout |
+
+---
+
+## References
+
+The synthetic demand simulator and cost framework used in this project are described in:
 
 ```bibtex
-@article{IDA2026,
-  author       = {Fukuhara, So and Alabdallah, Abdallah and Gunasekara, Nuwan and Nowaczyk, Slawomir},
-  title        = {Bridging Forecast Accuracy and Inventory KPIs: A Simulation-Based Evaluation Framework},
-  journal      = {arXiv preprint arXiv:2601.21844},
-  year         = {2026},
-  url          = {https://arxiv.org/abs/2601.21844}
+@article{fukuhara2026,
+  author  = {Fukuhara, So and Alabdallah, Abdallah and Gunasekara, Nuwan and Nowaczyk, Slawomir},
+  title   = {Bridging Forecast Accuracy and Inventory KPIs: A Simulation-Based Evaluation Framework},
+  journal = {arXiv preprint arXiv:2601.21844},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2601.21844}
 }
 ```
+
+The continuous action masking framework:
+
+```bibtex
+@inproceedings{stolz2024,
+  author    = {Stolz, Dimitri and Gros, Sebastien and Goodwin, Morten},
+  title     = {Continuous Action Masking for Reinforcement Learning},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  year      = {2024}
+}
+```
+
+The RL algorithms are implemented via [Stable-Baselines3](https://stable-baselines3.readthedocs.io/).

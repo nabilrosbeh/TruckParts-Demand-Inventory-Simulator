@@ -16,7 +16,7 @@ class ResultComparison:
         self.data_dir = os.path.join(project_root, "data")          # data directory
 
     # method: summarize results
-    def summrize_results(self):
+    def summarize_results(self):
         # directory, datapath
         feas_dir = os.path.join(self.MLmodel_dir, self.feas_name)
         metric_datapath = os.path.join(feas_dir, "evaluation_metric.csv")
