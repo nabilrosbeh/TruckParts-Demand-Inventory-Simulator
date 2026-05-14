@@ -1,196 +1,231 @@
-# Deep Reinforcement Learning for Spare Parts Inventory Control
+# TruckParts Deep RL Inventory Controller
 
-A bachelor's thesis project comparing four deep reinforcement learning algorithms against the classical Standard Inventory Policy (SIP) for automotive aftermarket spare parts inventory management.
+## 🔍 Overview
+This repository provides the implementation and supplementary materials for the bachelor's thesis *"Can Reinforcement Learning Match the Standard Inventory Policy for Spare Parts?"* at Halmstad University.
 
-Built on top of the synthetic demand simulator developed by Fukuhara et al. (see [References](#references)).
+The system extends the demand simulator by [Fukuhara et al. (2026)](https://arxiv.org/abs/2601.21844) with a reinforcement learning layer that replaces the classical ordering rule. It consists of two major components:
 
----
+1. **Demand Generator** — generates synthetic daily demand time-series data for truck spare parts under a dealer–truck–part hierarchy.
+2. **RL Inventory Controller** — trains four deep RL algorithms (PPO, SAC, A2C, TD3) directly on the inventory environment and evaluates them against the classical Standard Inventory Policy (SIP) on total cost and service level.
 
-## Overview
+The system produces:
+- Per-policy evaluation metrics: total cost, annualised cost, immediate service level (ISL), rush events, stockout rate
+- Cost comparison charts across all policies
+- Learning curves for each algorithm across training episodes
+- Per-part inventory traces over the test period
 
-The core question this project investigates:
-
-> *Can a deep RL agent learn an ordering policy that matches or outperforms the classical (s, Q) Standard Inventory Policy on total cost and service level?*
-
-A single dealer manages **4 spare part types** independently. Each day the agent observes inventory state across all parts and decides how much of each part to order. The environment runs a 7-step daily simulation (receive deliveries → fill backorders → serve demand → trigger rush orders on stockout → place proactive orders → charge holding cost).
-
-**Four algorithms are compared:**
-
-| Algorithm | Policy type | Policy class |
-|-----------|-------------|--------------|
-| PPO | On-policy | Stochastic |
-| A2C | On-policy | Stochastic |
-| SAC | Off-policy | Stochastic |
-| TD3 | Off-policy | Deterministic |
-
-**Two experimental conditions:**
-- **Masked** — A SIP-triggered interval mask constrains each order to `[0, Q*_t]` when stock falls at or below the dynamic reorder point. When the trigger is inactive the agent is forced to output zero.
-- **Unmasked** — Full action space `[0, Q_max]` available at all times.
-
-The SIP is the performance baseline because it is the policy currently used in practice in Volvo Group's Service Market Logistics.
-
----
-
-## Quickstart
-
+## 🚀 Getting Started
 ### 1. Clone the repository
-
-```bash
+```
 git clone https://github.com/nabilrosbeh/TruckParts-Demand-Inventory-Simulator.git
-cd TruckParts-Demand-Inventory-Simulator
 ```
 
 ### 2. Install dependencies
-
-```bash
+```
 pip install -r requirements.txt
 ```
+(Recommended Python version: Python 3.11)
 
-Requires Python 3.11. Key dependencies: `stable-baselines3`, `gymnasium`, `pandas`, `numpy`, `matplotlib`.
-
-### 3. Train all four algorithms (masked condition)
-
-```bash
-python train_with_mask.py
-```
-
-This trains PPO, SAC, A2C, and TD3 sequentially, evaluates them against the SIP on a held-out test period, and saves:
-- `results/policy_comparison.csv` — cost and service level metrics for all policies
-- `results/figures/` — learning curves and per-part inventory traces
-
-### 4. Train without the action mask (unmasked condition)
-
-```bash
-python train_without_mask.py
-```
-
-Identical setup with the mask disabled. Comparing results from both scripts isolates the contribution of the SIP-triggered mask to agent performance.
-
-### 5. Interactive exploration
-
-Open `notebooks/rl_inventory_mask.ipynb` for a step-by-step walkthrough of the masked condition: environment setup, training, evaluation plots, and cost decomposition. Use `notebooks/rl_inventory_nomask.ipynb` for the unmasked condition.
+## 🚀 Running the Workflow
+Open and execute `notebooks/rl_inventory_mask.ipynb` for the main experiment (with action mask), or `notebooks/rl_inventory_nomask.ipynb` for the comparison condition. The workflow is structured into two phases:
 
 ---
 
-## Repository Structure
+### Phase 1: Demand Generator
+The demand generator produces daily demand time-series data based on the hierarchical structure of dealers, trucks, and parts. Parameterisation includes start time, end time, time step, random seed, number of dealers, truck fleet size range, and number of part types per truck.
 
+```python
+from datetime import datetime
+
+start_time    = datetime(2025, 1, 1)
+end_time      = datetime(2031, 1, 1)
+delta_time    = 1
+seed          = 42
+
+n_dealers     = 1
+n_truck_range = [150, 200]
+n_part_range  = [4, 5]
+
+cfg = SimulationConfig(
+    start_time = start_time,
+    end_time   = end_time,
+    delta_time = delta_time
+)
+sim = Simulator(
+    config        = cfg,
+    seed          = seed,
+    n_dealers     = n_dealers,
+    n_truck_range = n_truck_range,
+    n_part_range  = n_part_range
+)
+events = sim.run()
 ```
-├── train_with_mask.py          # Training script — masked condition
-├── train_without_mask.py       # Training script — unmasked condition
-├── requirements.txt            # Python dependencies
+
+The generated demand is saved to `data/demand/demand_series.csv`. If the file already exists, the cell skips generation automatically — delete the file and re-run to regenerate with different parameters.
+
+---
+
+### Phase 2: RL Training & Inventory Control
+The RL layer replaces both the forecasting step and the ordering policy from the original simulator. The agent observes the full inventory state (stock levels, backorders, orders in transit, rolling demand statistics, reorder point, EOQ) and learns directly which quantity to order each day. An action mask enforces that orders are only placed when the SIP trigger fires and caps the order at the dynamic EOQ — this prevents the agent from converging to a "never order" strategy.
+
+All four algorithms share the same hyperparameters, defined once at the top of the training section:
+
+```python
+LR         = 3e-4    # learning rate
+GAMMA      = 0.995   # discount factor
+BATCH_SIZE = 256
+NET_ARCH   = [256, 256]
+```
+
+**PPO — Proximal Policy Optimisation**
+
+On-policy, stochastic. Updates directly from freshly collected experience and clips large gradient steps to stay stable.
+
+```python
+PPO_EPISODES = 2000
+
+ppo_model = PPO(
+    'MlpPolicy', env_ppo, verbose=0,
+    learning_rate = LR,
+    gamma         = GAMMA,
+    batch_size    = BATCH_SIZE,
+    policy_kwargs = dict(net_arch=NET_ARCH),
+    n_steps       = 30,
+    gae_lambda    = 0.97,
+    ent_coef      = 0.05,
+    n_epochs      = 4,
+    seed          = 42,
+)
+ppo_model.learn(total_timesteps=T_train * PPO_EPISODES)
+```
+
+**SAC — Soft Actor-Critic**
+
+Off-policy, stochastic. Stores past experience in a replay buffer and adds an entropy bonus to encourage exploration.
+
+```python
+SAC_EPISODES = 2000
+
+sac_model = SAC(
+    'MlpPolicy', env_sac, verbose=0,
+    learning_rate   = LR,
+    gamma           = GAMMA,
+    batch_size      = BATCH_SIZE,
+    policy_kwargs   = dict(net_arch=NET_ARCH),
+    buffer_size     = 500_000,
+    tau             = 0.005,
+    gradient_steps  = 128,
+    ent_coef        = 'auto',
+    seed            = 42,
+)
+sac_model.learn(total_timesteps=T_train * SAC_EPISODES)
+```
+
+**A2C — Advantage Actor-Critic**
+
+On-policy, stochastic. Lighter and faster than PPO; updates more frequently but with higher variance.
+
+```python
+A2C_EPISODES = 2000
+
+a2c_model = A2C(
+    'MlpPolicy', env_a2c, verbose=0,
+    learning_rate = LR,
+    gamma         = GAMMA,
+    policy_kwargs = dict(net_arch=NET_ARCH),
+    n_steps       = 30,
+    gae_lambda    = 0.97,
+    ent_coef      = 0.05,
+    seed          = 42,
+)
+a2c_model.learn(total_timesteps=T_train * A2C_EPISODES)
+```
+
+**TD3 — Twin Delayed DDPG**
+
+Off-policy, deterministic. Trains two critics and takes the minimum to avoid overestimating value; delays actor updates to let the critics stabilise first.
+
+```python
+TD3_EPISODES = 2000
+
+td3_model = TD3(
+    'MlpPolicy', env_td3, verbose=0,
+    learning_rate  = LR,
+    gamma          = GAMMA,
+    batch_size     = BATCH_SIZE,
+    policy_kwargs  = dict(net_arch=NET_ARCH),
+    buffer_size    = 500_000,
+    tau            = 0.005,
+    gradient_steps = 128,
+    action_noise   = NormalActionNoise(np.zeros(n_act), 20.0 * np.ones(n_act)),
+    policy_delay   = 2,
+    seed           = 42,
+)
+td3_model.learn(total_timesteps=T_train * TD3_EPISODES)
+```
+
+---
+
+### Output & Comparison
+All trained models and the SIP baseline are evaluated on the same held-out test period (last 20% of the data). Results are saved to `results/policy_comparison.csv` and visualised automatically.
+
+```python
+results = {}
+results['SIP'] = run_episode(make_test_env(), baseline_action)
+
+for name, model in trained_models.items():
+    results[name] = run_episode(make_test_env(), make_action_fn(model))
+
+metrics = {name: aggregate(rows) for name, rows in results.items()}
+```
+
+## 📁 Repository Structure
+```
+├── train_with_mask.py           # Standalone training script — mask ON
+├── train_without_mask.py        # Standalone training script — mask OFF
+├── requirements.txt
 │
 ├── lib/
-│   ├── demand/
-│   │   ├── Environment.py      # Gymnasium inventory environment (step, reset, obs)
-│   │   ├── dealer.py           # Dealer-level simulation logic
-│   │   ├── demand_management.py
-│   │   └── ...                 # Demand generator components (Fukuhara et al.)
-│   ├── cost/
-│   │   ├── simulationLogic.py  # Daily simulation step (7 operations)
-│   │   ├── inventoryPolices.py # SIP baseline implementation
-│   │   ├── costTracker.py      # Cost accounting (ordering, rush, holding)
-│   │   ├── orderManagement.py  # Order pipeline management
-│   │   └── ...
-│   └── ResultComparison.py     # Aggregation and comparison utilities
+│   └── cost/
+│       ├── simulationLogic.py
+│       ├── inventoryPolices.py
+│       ├── costTracker.py
+│       ├── orderManagement.py
+│       ├── stateManagement.py
+│       ├── eventManagement.py
+│       ├── timeManagement.py
+│       └── plotMetrics.py
+│   └── demand/
+│       ├── Environment.py
+│       ├── dealer.py
+│       ├── truck.py
+│       ├── demand_management.py
+│       ├── Noise_model.py
+│       ├── Parameter.py
+│       └── ...
+│   └── ResultComparison.py
 │
 ├── notebooks/
-│   ├── rl_inventory_mask.ipynb     # Main RL notebook — masked condition
-│   ├── rl_inventory_nomask.ipynb   # RL notebook — unmasked condition
-│   └── main.ipynb                  # Original SIP simulator notebook
+│   ├── rl_inventory_mask.ipynb      # Main experiment — mask ON
+│   ├── rl_inventory_nomask.ipynb    # Comparison — mask OFF
+│   └── main.ipynb                   # Original SIP simulator (Fukuhara et al.)
 │
 ├── data/
-│   └── demand/
-│       └── demand_series.csv   # Synthetic daily demand data (4 parts, ~2200 days)
+│   └── demand/                      # Generated demand datasets
 │
-├── results/
-│   ├── policy_comparison.csv   # Final evaluation metrics for all policies
-│   ├── rl_vs_sip.png           # Cost comparison: RL agents vs SIP
-│   ├── decision_trace_all_policies.png  # Order decisions over test period
-│   ├── inventory_results.png   # On-hand stock levels over time
-│   ├── Figures_episode_800_with_mask/   # Learning curves at 800 episodes (masked)
-│   ├── Figures_episode_800_no_mask/     # Learning curves at 800 episodes (unmasked)
-│   ├── Figures_episode_1500_with_mask/  # Learning curves at 1500 episodes (masked)
-│   └── Figures_episode_1500_no_mask/   # Learning curves at 1500 episodes (unmasked)
-│
-└── figures/                    # Thesis figures (demand series, train/test split, daily step diagram)
+└── results/
+    ├── policy_comparison.csv
+    ├── Figures_episode_800_with_mask/
+    ├── Figures_episode_800_no_mask/
+    ├── Figures_episode_1500_with_mask/
+    └── Figures_episode_1500_no_mask/
 ```
 
----
-
-## MDP Formulation
-
-| Component | Definition |
-|-----------|-----------|
-| **State** | 13-dimensional feature vector per part × N parts = 52-dim observation |
-| **Action** | Continuous order quantity per part ∈ [0, Q_max], Q_max = 5,000 units |
-| **Reward** | Negative total daily cost across all parts |
-| **Discount** | γ = 0.995 |
-| **Episode length** | 1,752 days (~5 years) training / 439 days test |
-
-**The 13 per-part observation features:**
-
-| Feature | Description |
-|---------|-------------|
-| `x` | On-hand inventory |
-| `b` | Backorders outstanding |
-| `z` | Inventory position (on-hand + pipeline − backorders) |
-| `u_nu` | Non-urgent units in transit |
-| `u_u` | Urgent units in transit |
-| `τ` | Days until next non-urgent delivery (15 if none in transit) |
-| `d` | Long-run mean daily demand (normalised) |
-| `μ_30` | 30-day rolling mean demand |
-| `σ_30` | 30-day rolling std of demand |
-| `doy` | Fractional day-of-year ∈ [0, 1] |
-| `s_t` | Dynamic reorder point (ROP from 30-day window) |
-| `Q*_t` | Dynamic EOQ (from 365-day window) |
-| `ξ` | SIP trigger signal ∈ {0, 1} |
-
-**Cost structure (per part, per day):**
-
-| Cost component | Value |
-|----------------|-------|
-| Non-urgent order fixed cost | 150 SEK |
-| Rush order fixed cost | 215 SEK |
-| Transport cost | 0.002 SEK / unit |
-| Holding cost | 0.15 × 0.13 SEK / unit / year |
-
-**Lead times:** 14 days (non-urgent), 2 days (urgent/rush).
-
----
-
-## SIP-Triggered Action Mask
-
-When the SIP trigger fires (on-hand ≤ dynamic ROP and no non-urgent order in transit), the agent's raw output is capped at the dynamic EOQ:
-
-```
-ã_p = clip(round(a_p), 1, max(1, floor(Q*_p)))   if trigger active
-ã_p = 0                                            otherwise
-```
-
-This narrows the decision from *whether and how much to order* to simply *how much to order within [0, Q*]*. The mask is applied inside `step()` before any inventory update, following the continuous action masking framework of Stolz et al. (2024).
-
----
-
-## Results
-
-Evaluation metrics are in `results/policy_comparison.csv`. Key columns:
-
-| Column | Description |
-|--------|-------------|
-| `Total_Cost_SEK` | Cumulative cost over 439-day test period |
-| `ISL` | Immediate service level (fraction of demand met from on-hand stock) |
-| `vs_SIP_ratio` | Cost relative to SIP (1.0 = SIP performance) |
-| `N_Rush_Events` | Number of automatic rush orders triggered |
-| `Stockout_Rate` | Fraction of days with a stockout |
-
----
-
-## References
-
-The synthetic demand simulator and cost framework used in this project are described in:
+## 📝 References
+The demand simulator used in Phase 1 is described in:
 
 ```bibtex
-@article{fukuhara2026,
+@article{IDA2026,
   author  = {Fukuhara, So and Alabdallah, Abdallah and Gunasekara, Nuwan and Nowaczyk, Slawomir},
   title   = {Bridging Forecast Accuracy and Inventory KPIs: A Simulation-Based Evaluation Framework},
   journal = {arXiv preprint arXiv:2601.21844},
@@ -199,7 +234,7 @@ The synthetic demand simulator and cost framework used in this project are descr
 }
 ```
 
-The continuous action masking framework:
+The continuous action masking framework used in Phase 2:
 
 ```bibtex
 @inproceedings{stolz2024,
@@ -209,5 +244,3 @@ The continuous action masking framework:
   year      = {2024}
 }
 ```
-
-The RL algorithms are implemented via [Stable-Baselines3](https://stable-baselines3.readthedocs.io/).
