@@ -254,26 +254,3 @@ metrics = {name: aggregate(rows) for name, rows in results.items()}
     └── Figures_episode_1500_no_mask/
 ```
 
-## 📝 References
-The demand simulator used in Phase 1 is described in:
-
-```bibtex
-@article{IDA2026,
-  author  = {Fukuhara, So and Alabdallah, Abdallah and Gunasekara, Nuwan and Nowaczyk, Slawomir},
-  title   = {Bridging Forecast Accuracy and Inventory KPIs: A Simulation-Based Evaluation Framework},
-  journal = {arXiv preprint arXiv:2601.21844},
-  year    = {2026},
-  url     = {https://arxiv.org/abs/2601.21844}
-}
-```
-
-The continuous action masking framework used in Phase 2:
-
-```bibtex
-@inproceedings{stolz2024,
-  author    = {Stolz, Dimitri and Gros, Sebastien and Goodwin, Morten},
-  title     = {Continuous Action Masking for Reinforcement Learning},
-  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-  year      = {2024}
-}
-```
