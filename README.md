@@ -166,6 +166,39 @@ td3_model.learn(total_timesteps=T_train * TD3_EPISODES)
 
 ---
 
+### The Inventory Environment — `MultiPartInventoryEnv`
+
+The custom Gymnasium environment is defined inside the notebook (Cell 2). It simulates a single dealer managing multiple spare-part types under a periodic-review inventory policy. The entire experiment — training, masking, and evaluation — runs through this class.
+
+```python
+env = MultiPartInventoryEnv(
+    demand_dict           = train_demand_dict,   # dict: part_type → daily demand array
+    start_date            = train_start_date,    # datetime of day 0
+    part_types            = part_types,          # list of part-type identifiers
+    lead_time             = 14,                  # days for a regular order to arrive
+    urgent_lead           = 2,                   # days for an emergency order to arrive
+    initial_stock         = 120,                 # starting stock for every part
+    max_order             = 5000,                # maximum units per single order
+    use_mask              = True,                # True = mask ON (main), False = mask OFF
+    demand_history_window = 30,                  # rolling window for demand statistics
+)
+```
+
+**Key methods:**
+
+| Method | What it does |
+|---|---|
+| `reset()` | Resets stock, backorders, and pipelines to their initial values at the start of a new episode. |
+| `step(action)` | Advances one day: applies the mask, receives deliveries, fills backorders, serves demand, places orders, and charges holding cost. |
+| `_obs()` | Builds the flat observation vector — 13 features per part (stock, backorders, inventory position, pipeline quantities, demand statistics, dynamic ROP, EOQ, SIP signal). |
+| `_compute_dyn_rop_eoq(pt)` | Computes the dynamic reorder point and EOQ for one part from its rolling demand history. |
+| `_deliver_due(pipeline, pt, day)` | Pulls and returns all units from a pipeline whose scheduled arrival day has been reached. |
+| `render()` | Prints a one-line stock and pipeline summary for every part (for debugging). |
+
+The helper function `load_all_parts_for_dealer(dealer_id, csv_path)` reads the generated demand CSV and returns the demand dictionary, start date, and part-type list for a given dealer — these are passed directly into the environment constructor.
+
+---
+
 ### Output & Comparison
 All trained models and the SIP baseline are evaluated on the same held-out test period (last 20% of the data). Results are saved to `results/policy_comparison.csv` and visualised automatically.
 
